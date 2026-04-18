@@ -27,17 +27,13 @@ console.log("Tower — Your Morning Copilot");
 console.log("Listening for messages...");
 if (MY_PHONE) console.log(`Scoped to: ${MY_PHONE}`);
 
-// ── Anti-loop protection ──────────────────────────────────────────────
+// ── Anti-loop: per-sender lock ────────────────────────────────────────
+// While Tower is handling a message from a sender, ALL other messages
+// from that sender are dropped. Lock stays for 15s after completion
+// to catch late-arriving duplicates (send timeout is 10s).
+const senderLock = new Set<string>();
 
-// 1. Track processed message IDs so we never handle the same DB row twice
-const processedIds = new Set<string>();
-
-// 2. Track recent message text (30s window) — catches the blue/grey bubble
-//    duplicate when texting yourself. 30s because the SDK send timeout is 10s.
-const recentTexts = new Set<string>();
-
-// 3. Every possible Tower reply starts with one of these prefixes.
-//    If an incoming message matches, it's our own echo.
+// ── Anti-loop: bot echo prefixes ──────────────────────────────────────
 const BOT_PREFIXES = [
   "tower — your morning copilot",
   "i didn't catch that",
@@ -83,9 +79,6 @@ const BOT_PREFIXES = [
   "invalid time",
   "ceiling must be",
   "visibility must be",
-  // METAR decode replies start with the ICAO code like "CYYZ —"
-  // TAF replies start with "CYYZ — TAF"
-  // These are 4 uppercase letters followed by " —"
 ];
 
 function isBotEcho(text: string): boolean {
@@ -93,10 +86,8 @@ function isBotEcho(text: string): boolean {
   for (const prefix of BOT_PREFIXES) {
     if (lower.startsWith(prefix)) return true;
   }
-  // Also catch METAR/TAF decode replies: "CYYZ — Toronto Pearson" etc.
+  // METAR/TAF decode replies: "CYYZ — Toronto Pearson" etc.
   if (/^[A-Z]{4} —/.test(text)) return true;
-  // Catch crosswind report replies
-  if (/^[A-Z]{4} —.*\n/.test(text)) return true;
   return false;
 }
 
@@ -105,66 +96,51 @@ function isBotEcho(text: string): boolean {
 await sdk.startWatching({
   onMessage: async (msg: any) => {
     try {
-      // Layer 1: Skip messages we sent (isFromMe flag from iMessage DB)
-      if (msg.isFromMe) {
-        if (DEBUG) console.log(`[skip:fromMe] ${(msg.text ?? "").slice(0, 40)}`);
-        return;
-      }
+      // 1. Skip our own sent messages
+      if (msg.isFromMe) return;
 
       const text = msg.text?.trim();
       if (!text) return;
 
-      // Layer 2: Skip known bot reply prefixes
+      // 2. Skip bot echoes
       if (isBotEcho(text)) {
         if (DEBUG) console.log(`[skip:echo] ${text.slice(0, 50)}`);
         return;
       }
 
-      // Layer 3: Skip by message ID (prevents re-processing same DB row)
-      const msgId = String(msg.id ?? msg.guid ?? msg.rowid ?? "");
-      if (msgId) {
-        if (processedIds.has(msgId)) {
-          if (DEBUG) console.log(`[skip:id] ${msgId}`);
-          return;
-        }
-        processedIds.add(msgId);
-        setTimeout(() => processedIds.delete(msgId), 120_000);
-      }
-
-      // Layer 4: Skip duplicate text within 30s (blue/grey bubble dedup)
-      const textKey = text.toLowerCase();
-      if (recentTexts.has(textKey)) {
-        if (DEBUG) console.log(`[skip:dedup] ${text.slice(0, 50)}`);
-        return;
-      }
-      recentTexts.add(textKey);
-      setTimeout(() => recentTexts.delete(textKey), 30_000);
-
-      // Layer 5: Phone number filter
+      // 3. Phone number filter
       const sender = msg.sender ?? msg.participant ?? msg.handle ?? "";
       if (!sender) return;
-      if (MY_PHONE && !sender.includes(MY_PHONE.replace(/[^0-9]/g, ""))) {
+      if (MY_PHONE && !sender.includes(MY_PHONE.replace(/[^0-9]/g, ""))) return;
+
+      // 4. Per-sender lock — only one message at a time per person
+      if (senderLock.has(sender)) {
+        if (DEBUG) console.log(`[skip:locked] ${text.slice(0, 50)}`);
         return;
       }
+      senderLock.add(sender);
 
       console.log(`[${sender}] ${text}`);
 
       const result = await routeMessage(sender, text);
 
-      // Send response (use chatId if available, else phone number)
+      // Send response
       const target = msg.chatId ?? sender;
       if (result.images && result.images.length > 0) {
-        await sdk.send(target, {
-          text: result.text,
-          attachments: result.images,
-        }).catch(() => {}); // Swallow send timeout errors — message still goes through
+        await sdk.send(target, { text: result.text, attachments: result.images }).catch(() => {});
       } else {
         await sdk.send(target, result.text).catch(() => {});
       }
 
       console.log(`[→ ${sender}] ${result.text.slice(0, 80)}...`);
+
+      // Keep lock for 15s after send to catch late duplicates
+      setTimeout(() => senderLock.delete(sender), 15_000);
     } catch (error) {
       console.error("Error handling message:", error);
+      // Release lock on error so user isn't permanently stuck
+      const sender = msg?.sender ?? msg?.participant ?? msg?.handle ?? "";
+      if (sender) setTimeout(() => senderLock.delete(sender), 5_000);
     }
   },
   onError: (error: any) => {
@@ -186,14 +162,11 @@ function scheduleMorningBriefings() {
         } else {
           await sdk.send(user.phone, result.text).catch(() => {});
         }
-        if (DEBUG) console.log(`Morning briefing sent to ${user.phone}`);
       } catch (error) {
         console.error(`Morning briefing error for ${user.phone}:`, error);
       }
       scheduleMorningBriefings();
     }, ms);
-    const wakeFormatted = `${user.wake_time.slice(0, 2)}:${user.wake_time.slice(2, 4)}`;
-    console.log(`Scheduled morning briefing for ${user.phone} at ${wakeFormatted} ${user.timezone}`);
   }
 }
 
