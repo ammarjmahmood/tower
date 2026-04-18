@@ -4,6 +4,8 @@
 
 Tower is an iMessage agent that lives in your texts. It gives pilots — especially student pilots — a daily weather briefing, go/no-go recommendations, METAR/TAF decoding, weather images, quiz mode, and flight hour tracking. No app to open, no UI. Just text.
 
+![Tower Demo](assets/demo.gif)
+
 ## Quick Start
 
 ### Prerequisites
@@ -139,6 +141,7 @@ Every morning briefing includes a generated weather card image showing:
 
 ```
 tower/
+├── assets/            — project assets (demo gifs, images)
 ├── src/
 │   ├── index.ts           — entry point, SDK init, message watcher
 │   ├── router.ts          — parses messages, routes to command handlers
@@ -174,3 +177,68 @@ DEBUG=true bun run src/index.ts
 - [AVWX](https://avwx.rest) — Aviation weather API
 - [Satori](https://github.com/vercel/satori) — JSX to SVG
 - [@resvg/resvg-js](https://github.com/nicolo-ribaudo/resvg-js) — SVG to PNG
+
+## Running in the Background (LaunchAgent)
+
+To keep Tower running automatically without a terminal window, install it as a macOS LaunchAgent. Tower will start at login and restart if it crashes.
+
+**1. Create the plist file:**
+
+```bash
+cat > ~/Library/LaunchAgents/com.tower.imessagebot.plist << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tower.imessagebot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR_USERNAME/.bun/bin/bun</string>
+        <string>run</string>
+        <string>/Users/YOUR_USERNAME/Documents/GitHub/tower/src/index.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/Documents/GitHub/tower</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Documents/GitHub/tower/tower.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Documents/GitHub/tower/tower.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/Users/YOUR_USERNAME/.bun/bin</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+```
+
+Replace `YOUR_USERNAME` with your macOS username (`whoami` to check).
+
+**2. Load it:**
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.tower.imessagebot.plist
+```
+
+**3. Check it's running:**
+
+```bash
+tail -f ~/Documents/GitHub/tower/tower.log
+```
+
+**4. To stop / restart:**
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.tower.imessagebot.plist  # stop
+launchctl load   ~/Library/LaunchAgents/com.tower.imessagebot.plist  # start
+```
+
+> **Note:** Tower requires the Mac to be on and iMessage to be signed in. It reads iMessage's local SQLite database directly — there is no cloud component.
