@@ -159,7 +159,7 @@ export function buildWeatherCard(props: WeatherCardProps) {
         {
           type: "div" as const,
           props: {
-            style: { fontSize: 13, color: "#94a3b8" },
+            style: { display: "flex", flexDirection: "column" as const, fontSize: 13, color: "#94a3b8" },
             children: [
               crosswindInfo ? {
                 type: "div" as const,

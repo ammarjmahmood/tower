@@ -3,8 +3,10 @@ import { routeMessage } from "./router";
 import { getAllUsers } from "./store/preferences";
 import { handleMorning } from "./commands/morning";
 import { msUntilTime } from "./utils/time";
+import { prefetchWeather, startWeatherRefresh } from "./services/weather-cache";
 
-const MY_PHONE = process.env.MY_PHONE;
+const MY_PHONE = process.env.MY_PHONE; // iCloud email or phone number to accept messages from
+const MY_CANONICAL_PHONE = process.env.MY_CANONICAL_PHONE ?? MY_PHONE; // phone number for DB lookups
 const DEBUG = process.env.DEBUG === "true";
 
 if (!process.env.AVWX_TOKEN) {
@@ -21,6 +23,9 @@ const sdk = new IMessageSDK({
   watcher: {
     excludeOwnMessages: false,
   },
+  retry: {
+    max: 1, // 1 attempt only — AppleScript always succeeds but SDK can't confirm self-text delivery
+  },             // default max:2 would send twice; max:1 sends once
 });
 
 console.log("Tower — Your Morning Copilot");
@@ -101,7 +106,7 @@ function isDuplicateText(chatKey: string, text: string): boolean {
 await sdk.startWatching({
   onMessage: async (msg: any) => {
     try {
-      // 1. Skip our own sent messages
+      // Skip our own sent messages
       if (msg.isFromMe) return;
 
       const text = msg.text?.trim();
@@ -128,22 +133,29 @@ await sdk.startWatching({
         return;
       }
 
-      // 5. Phone number filter
-      if (MY_PHONE && !sender.includes(MY_PHONE.replace(/[^0-9]/g, ""))) return;
+      // 5. Sender filter — accept MY_PHONE (iCloud email or phone number)
+      if (MY_PHONE) {
+        const digits = MY_PHONE.replace(/[^0-9]/g, "");
+        const match = sender === MY_PHONE || (digits && sender.includes(digits));
+        if (!match) return;
+      }
+
+      // Normalize sender to canonical phone number for DB lookups
+      const phone = MY_CANONICAL_PHONE ?? sender;
 
       console.log(`[${sender}] ${text}`);
 
-      const result = await routeMessage(sender, text);
+      const result = await routeMessage(phone, text);
 
       // Track our reply BEFORE sending so the echo guard catches it
       echoGuard.track(chatKey, result.text);
 
-      // Send response — swallow timeout errors (message still delivers)
-      const target = msg.chatId ?? sender;
+      // Always send text first — never let a failed image suppress the text
+      const target = msg.chatId ?? MY_PHONE ?? sender;
+      await sdk.send(target, result.text).catch(() => {});
+      // Then try to attach image separately
       if (result.images && result.images.length > 0) {
-        await sdk.send(target, { text: result.text, attachments: result.images }).catch(() => {});
-      } else {
-        await sdk.send(target, result.text).catch(() => {});
+        await sdk.send(target, { text: "", attachments: result.images }).catch(() => {});
       }
 
       console.log(`[→ ${sender}] ${result.text.slice(0, 80)}...`);
@@ -166,10 +178,9 @@ function scheduleMorningBriefings() {
       try {
         const result = await handleMorning(user.phone);
         echoGuard.track(user.phone, result.text);
+        await sdk.send(user.phone, result.text).catch(() => {});
         if (result.images && result.images.length > 0) {
-          await sdk.send(user.phone, { text: result.text, attachments: result.images }).catch(() => {});
-        } else {
-          await sdk.send(user.phone, result.text).catch(() => {});
+          await sdk.send(user.phone, { text: "", attachments: result.images }).catch(() => {});
         }
       } catch (error) {
         console.error(`Morning briefing error for ${user.phone}:`, error);
@@ -180,6 +191,17 @@ function scheduleMorningBriefings() {
 }
 
 scheduleMorningBriefings();
+
+// Pre-fetch weather for all users with a home airport so gm is instant
+const usersWithHome = getAllUsers();
+if (usersWithHome.length > 0) {
+  for (const u of usersWithHome) {
+    if (u.home_airport) prefetchWeather(u.home_airport).catch(() => {});
+  }
+  startWeatherRefresh(() =>
+    getAllUsers().map((u) => u.home_airport).filter(Boolean) as string[]
+  );
+}
 
 process.on("SIGINT", () => {
   console.log("\nShutting down Tower...");

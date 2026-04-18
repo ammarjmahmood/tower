@@ -10,14 +10,17 @@ function loadFont(): ArrayBuffer {
   const fontPaths = [
     join(import.meta.dir, "assets", "Inter-Regular.ttf"),
     join(import.meta.dir, "assets", "Inter-Bold.ttf"),
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/System/Library/Fonts/SFNSText.ttf",
-    "/System/Library/Fonts/SFNS.ttf",
+    "/System/Library/Fonts/Geneva.ttf",     // simple TTF, no variable font tables
+    "/System/Library/Fonts/NewYork.ttf",    // fallback TTF
+    "/System/Library/Fonts/SFNS.ttf",       // variable font — may fail on older opentype.js
+    // Helvetica.ttc intentionally omitted — TTC format not supported by opentype.js
   ];
 
   for (const p of fontPaths) {
     if (existsSync(p)) {
-      return readFileSync(p).buffer as ArrayBuffer;
+      const buf = readFileSync(p);
+      // Bun/Node Buffer.buffer may have an offset into a larger pool — slice it out
+      return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
     }
   }
 

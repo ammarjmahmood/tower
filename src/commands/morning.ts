@@ -1,4 +1,5 @@
 import { fetchMetar, fetchTaf, fetchStation } from "../services/avwx";
+import { getCachedWeather, prefetchWeather } from "../services/weather-cache";
 import { fetchGeneralWeather, describeWeatherCode } from "../services/openmeteo";
 import { fetchSunTimes, formatSunTime } from "../services/sunrise";
 import { getOrCreateUser } from "../store/preferences";
@@ -22,13 +23,14 @@ export async function handleMorning(phone: string): Promise<{ text: string; imag
   const icao = prefs.home_airport;
 
   try {
-    // Fetch all data in parallel
-    const [metar, taf, station, sunTimes] = await Promise.all([
-      fetchMetar(icao),
-      fetchTaf(icao),
-      fetchStation(icao),
-      fetchSunTimes(0, 0).catch(() => null), // will use station coords below
-    ]);
+    // Use cached weather if available (pre-fetched at startup), else fetch live
+    const cached = getCachedWeather(icao);
+    const [metar, taf, station] = cached
+      ? [cached.metar, cached.taf, cached.station]
+      : await Promise.all([fetchMetar(icao), fetchTaf(icao), fetchStation(icao)]);
+
+    // Kick off background refresh so next gm is also instant
+    if (cached) prefetchWeather(icao).catch(() => {});
 
     // Fetch general weather and sun times with station coords
     const [generalWeather, realSunTimes] = await Promise.all([
