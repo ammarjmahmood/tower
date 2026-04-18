@@ -27,68 +27,73 @@ console.log("Tower — Your Morning Copilot");
 console.log("Listening for messages...");
 if (MY_PHONE) console.log(`Scoped to: ${MY_PHONE}`);
 
-// ── Anti-loop: per-sender lock ────────────────────────────────────────
-// While Tower is handling a message from a sender, ALL other messages
-// from that sender are dropped. Lock stays for 15s after completion
-// to catch late-arriving duplicates (send timeout is 10s).
-const senderLock = new Set<string>();
+// ── EchoGuard (from future-me-courtroom-agent pattern) ────────────────
+// Tracks everything Tower sends. If an incoming message matches
+// something we recently sent, it's our own echo — skip it.
+class EchoGuard {
+  private messages = new Map<string, { text: string; at: number }[]>();
 
-// ── Anti-loop: bot echo prefixes ──────────────────────────────────────
-const BOT_PREFIXES = [
-  "tower — your morning copilot",
-  "i didn't catch that",
-  "set your home airport first",
-  "✓",
-  "your settings:",
-  "your flight log:",
-  "currency check:",
-  "no flights logged",
-  "metar quiz:",
-  "go/no-go scenario:",
-  "correct answer:",
-  "scenario generation error",
-  "no active quiz",
-  "no active scenario",
-  "nothing to explain yet",
-  "route briefing:",
-  "crosswind breakdown:",
-  "radar composite",
-  "gfa —",
-  "briefing error:",
-  "metar error",
-  "taf error",
-  "winds error",
-  "radar download error",
-  "gfa download error",
-  "invalid airport code",
-  "invalid hours",
-  "invalid flight type",
-  "no runway data",
-  "no valid airport codes",
-  "no priority set",
-  "no active priority",
-  "usage:",
-  "☀️ good morning",
-  "⚠️ good morning",
-  "🌙 good night",
-  "evaluation error",
-  "explain error",
-  "score:",
-  "i don't recognize",
-  "use 24hr format",
-  "invalid time",
-  "ceiling must be",
-  "visibility must be",
-];
-
-function isBotEcho(text: string): boolean {
-  const lower = text.toLowerCase();
-  for (const prefix of BOT_PREFIXES) {
-    if (lower.startsWith(prefix)) return true;
+  track(chatKey: string, text: string) {
+    this.prune();
+    const entries = this.messages.get(chatKey) ?? [];
+    entries.push({ text: this.normalize(text), at: Date.now() });
+    this.messages.set(chatKey, entries.slice(-50));
   }
-  // METAR/TAF decode replies: "CYYZ — Toronto Pearson" etc.
-  if (/^[A-Z]{4} —/.test(text)) return true;
-  return false;
+
+  isEcho(chatKey: string, text: string): boolean {
+    this.prune();
+    const entries = this.messages.get(chatKey);
+    if (!entries) return false;
+    const normalized = this.normalize(text);
+    return entries.some((e) => e.text === normalized);
+  }
+
+  private normalize(text: string): string {
+    return text.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  private prune() {
+    const cutoff = Date.now() - 12 * 60 * 60 * 1000; // 12 hours
+    for (const [key, entries] of this.messages.entries()) {
+      const keep = entries.filter((e) => e.at >= cutoff);
+      if (keep.length > 0) this.messages.set(key, keep);
+      else this.messages.delete(key);
+    }
+  }
+}
+
+const echoGuard = new EchoGuard();
+
+// ── Dedup: processed message GUIDs ────────────────────────────────────
+const processedGuids = new Map<string, number>();
+
+function alreadyProcessed(guid: string): boolean {
+  // Prune old entries
+  const now = Date.now();
+  for (const [k, at] of processedGuids.entries()) {
+    if (now - at > 10 * 60 * 1000) processedGuids.delete(k);
+  }
+  return processedGuids.has(guid);
+}
+
+function markProcessed(guid: string) {
+  processedGuids.set(guid, Date.now());
+}
+
+// ── Dedup: same text within 30s per chat ──────────────────────────────
+const recentInbound = new Map<string, { text: string; at: number }[]>();
+
+function isDuplicateText(chatKey: string, text: string): boolean {
+  const now = Date.now();
+  const cutoff = now - 30_000;
+  const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();
+
+  const existing = recentInbound.get(chatKey) ?? [];
+  const pruned = existing.filter((e) => e.at >= cutoff);
+  const dup = pruned.some((e) => e.text === normalized);
+  pruned.push({ text: normalized, at: now });
+  recentInbound.set(chatKey, pruned.slice(-20));
+  return dup;
 }
 
 // ── Message handler ───────────────────────────────────────────────────
@@ -102,29 +107,38 @@ await sdk.startWatching({
       const text = msg.text?.trim();
       if (!text) return;
 
-      // 2. Skip bot echoes
-      if (isBotEcho(text)) {
+      // 2. Skip by GUID (same DB row)
+      const guid = msg.guid ?? msg.id ?? "";
+      if (guid && alreadyProcessed(String(guid))) return;
+      if (guid) markProcessed(String(guid));
+
+      const sender = msg.sender ?? msg.participant ?? msg.handle ?? "";
+      if (!sender) return;
+      const chatKey = msg.chatId ?? sender;
+
+      // 3. Skip if it matches something we recently sent (echo guard)
+      if (echoGuard.isEcho(chatKey, text)) {
         if (DEBUG) console.log(`[skip:echo] ${text.slice(0, 50)}`);
         return;
       }
 
-      // 3. Phone number filter
-      const sender = msg.sender ?? msg.participant ?? msg.handle ?? "";
-      if (!sender) return;
-      if (MY_PHONE && !sender.includes(MY_PHONE.replace(/[^0-9]/g, ""))) return;
-
-      // 4. Per-sender lock — only one message at a time per person
-      if (senderLock.has(sender)) {
-        if (DEBUG) console.log(`[skip:locked] ${text.slice(0, 50)}`);
+      // 4. Skip duplicate text within 30s
+      if (isDuplicateText(chatKey, text)) {
+        if (DEBUG) console.log(`[skip:dedup] ${text.slice(0, 50)}`);
         return;
       }
-      senderLock.add(sender);
+
+      // 5. Phone number filter
+      if (MY_PHONE && !sender.includes(MY_PHONE.replace(/[^0-9]/g, ""))) return;
 
       console.log(`[${sender}] ${text}`);
 
       const result = await routeMessage(sender, text);
 
-      // Send response
+      // Track our reply BEFORE sending so the echo guard catches it
+      echoGuard.track(chatKey, result.text);
+
+      // Send response — swallow timeout errors (message still delivers)
       const target = msg.chatId ?? sender;
       if (result.images && result.images.length > 0) {
         await sdk.send(target, { text: result.text, attachments: result.images }).catch(() => {});
@@ -133,14 +147,8 @@ await sdk.startWatching({
       }
 
       console.log(`[→ ${sender}] ${result.text.slice(0, 80)}...`);
-
-      // Keep lock for 15s after send to catch late duplicates
-      setTimeout(() => senderLock.delete(sender), 15_000);
     } catch (error) {
       console.error("Error handling message:", error);
-      // Release lock on error so user isn't permanently stuck
-      const sender = msg?.sender ?? msg?.participant ?? msg?.handle ?? "";
-      if (sender) setTimeout(() => senderLock.delete(sender), 5_000);
     }
   },
   onError: (error: any) => {
@@ -157,6 +165,7 @@ function scheduleMorningBriefings() {
     setTimeout(async () => {
       try {
         const result = await handleMorning(user.phone);
+        echoGuard.track(user.phone, result.text);
         if (result.images && result.images.length > 0) {
           await sdk.send(user.phone, { text: result.text, attachments: result.images }).catch(() => {});
         } else {
