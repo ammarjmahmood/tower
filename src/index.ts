@@ -17,59 +17,100 @@ if (!process.env.AZURE_OPENAI_API_KEY) {
   process.exit(1);
 }
 
-const sdk = new IMessageSDK({ debug: DEBUG });
+const sdk = new IMessageSDK({
+  debug: DEBUG,
+  watcher: {
+    excludeOwnMessages: false, // We handle filtering ourselves
+  },
+});
 
 console.log("Tower — Your Morning Copilot");
 console.log("Listening for messages...");
 if (MY_PHONE) console.log(`Scoped to: ${MY_PHONE}`);
 
-// Track recently sent messages to avoid feedback loop
-const recentlySent = new Set<string>();
-const DEDUP_WINDOW_MS = 30_000; // 30 seconds
+// Known bot reply prefixes — if a message starts with any of these, it's our own reply echoing back
+const BOT_REPLY_PREFIXES = [
+  "tower — your morning copilot",
+  "i didn't catch that",
+  "set your home airport first",
+  "✓ home airport set",
+  "✓ minimums set",
+  "✓ morning briefing set",
+  "✓ aircraft set",
+  "✓ priority set",
+  "✓ priority completed",
+  "✓ logged",
+  "your settings:",
+  "your flight log:",
+  "currency check:",
+  "no flights logged",
+  "metar quiz:",
+  "✓ correct!",
+  "✗ not quite",
+  "go/no-go scenario:",
+  "correct answer:",
+  "scenario generation error",
+  "no active quiz",
+  "no active scenario",
+  "nothing to explain yet",
+  "route briefing:",
+  "crosswind breakdown:",
+  "radar composite",
+  "gfa —",
+  "briefing error:",
+  "metar error",
+  "taf error",
+  "winds error",
+  "radar download error",
+  "gfa download error",
+  "invalid airport code",
+  "invalid hours",
+  "invalid flight type",
+  "no runway data",
+  "no valid airport codes",
+  "no priority set",
+  "no active priority",
+  "usage:",
+  "☀️ good morning",
+  "⚠️ good morning",
+  "🌙 good night",
+  "evaluation error",
+  "explain error",
+];
 
-function trackSent(text: string) {
-  const key = text.trim().slice(0, 100);
-  recentlySent.add(key);
-  setTimeout(() => recentlySent.delete(key), DEDUP_WINDOW_MS);
-}
-
-function wasSentByUs(text: string): boolean {
-  const key = text.trim().slice(0, 100);
-  return recentlySent.has(key);
-}
-
-// Track message IDs we've already processed to prevent duplicates
-const processedMessages = new Set<string>();
-const PROCESSED_WINDOW_MS = 60_000;
+// Dedup exact messages within 5 seconds (blue/grey bubble duplicate when texting yourself)
+const recentMessages = new Set<string>();
 
 // Start watching for incoming messages
 await sdk.startWatching({
-  onDirectMessage: async (msg: any) => {
+  onMessage: async (msg: any) => {
     try {
-      // Use the SDK's is_from_me flag if available
-      if (msg.is_from_me || msg.isFromMe) return;
-
-      const sender = msg.participant ?? msg.sender ?? msg.handle;
       const text = msg.text?.trim();
+      if (!text) return;
 
-      if (!sender || !text) return;
+      const lower = text.toLowerCase();
 
-      // If MY_PHONE is set, only respond to that number
-      if (MY_PHONE && !sender.includes(MY_PHONE.replace(/[^0-9]/g, ""))) {
+      // Skip messages that start with known bot reply prefixes
+      for (const prefix of BOT_REPLY_PREFIXES) {
+        if (lower.startsWith(prefix)) {
+          if (DEBUG) console.log(`[skip] Bot echo: ${text.slice(0, 50)}`);
+          return;
+        }
+      }
+
+      // Dedup exact messages within 5 seconds (handles blue/grey bubble duplication)
+      if (recentMessages.has(lower)) {
+        if (DEBUG) console.log(`[skip] Duplicate: ${text.slice(0, 50)}`);
         return;
       }
+      recentMessages.add(lower);
+      setTimeout(() => recentMessages.delete(lower), 5000);
 
-      // Deduplicate by message ID if available
-      const msgId = msg.guid ?? msg.id ?? msg.rowid;
-      if (msgId) {
-        if (processedMessages.has(String(msgId))) return;
-        processedMessages.add(String(msgId));
-        setTimeout(() => processedMessages.delete(String(msgId)), PROCESSED_WINDOW_MS);
-      }
+      const sender = msg.sender ?? msg.participant ?? msg.handle ?? "";
+      if (!sender) return;
 
-      // Skip if this looks like something we just sent (feedback loop prevention)
-      if (wasSentByUs(text)) {
-        if (DEBUG) console.log(`[skip] Echo detected: ${text.slice(0, 50)}`);
+      // If MY_PHONE is set, only respond to messages from that number
+      if (MY_PHONE && !sender.includes(MY_PHONE.replace(/[^0-9]/g, ""))) {
         return;
       }
 
@@ -77,17 +118,14 @@ await sdk.startWatching({
 
       const result = await routeMessage(sender, text);
 
-      // Track our outgoing message to prevent echo loop
-      trackSent(result.text);
-
       // Send response
       if (result.images && result.images.length > 0) {
-        await sdk.send(sender, {
+        await sdk.send(msg.chatId ?? sender, {
           text: result.text,
           attachments: result.images,
         });
       } else {
-        await sdk.send(sender, result.text);
+        await sdk.send(msg.chatId ?? sender, result.text);
       }
 
       if (DEBUG) console.log(`[→ ${sender}] ${result.text.slice(0, 80)}...`);
