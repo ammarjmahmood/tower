@@ -1,0 +1,20 @@
+{
+  "name": "tower",
+  "version": "1.0.0",
+  "description": "Your Morning Copilot — iMessage aviation weather briefings",
+  "module": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts"
+  },
+  "dependencies": {
+    "@photon-ai/imessage-kit": "latest",
+    "@resvg/resvg-js": "latest",
+    "satori": "latest"
+  },
+  "devDependencies": {
+    "typescript": "^5.3",
+    "@types/bun": "latest"
+  }
+}
