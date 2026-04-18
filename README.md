@@ -4,7 +4,7 @@
 
 Tower is an iMessage agent that lives in your texts. It gives pilots — especially student pilots — a daily weather briefing, go/no-go recommendations, METAR/TAF decoding, weather images, quiz mode, and flight hour tracking. No app to open, no UI. Just text.
 
-![Tower Demo](assets/demo.gif)
+<img src="assets/demo.gif" width="300" />
 
 ## Quick Start
 
